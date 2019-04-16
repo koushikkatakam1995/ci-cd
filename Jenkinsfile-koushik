@@ -1,0 +1,385 @@
+#!/usr/bin/env groovy
+
+// This is the jenkinsfile.
+
+
+//Main Pipeline
+pipeline {
+  agent any
+
+  stages {
+    
+    stage('cleanup') 
+    {
+      steps 
+      {
+        echo 'Clean workspace'
+        cleanWs()
+      }
+    }
+
+    stage('prepare') {
+      steps {
+        script {
+
+          //Checkout the propertyfile and read properties from it.
+
+          echo "checking out the property file: " + propertyFile
+          workSpacess = env.WORKSPACE
+          environment = 'DEV'
+
+          
+
+            withCredentials([usernamePassword(credentialsId: gitcredID, usernameVariable: 'gituser', passwordVariable: 'gitpw')]) 
+            {
+                      
+            sh "git clone https://${gituser}:${gitpw}@${gitPropertyRepo} ."
+            sh "git checkout ${gitPropertyBranch}"
+            sh "mkdir scripts;cp -r deploy.sh ${workSpacess}/scripts/"
+            }
+
+
+          }
+          
+          echo "Reading the property file: " + propertyFile
+
+          property = readProperties file: propertyFile
+          
+          emailRecipients = property.emailRecipients
+          repoUrl = property.repoUrl
+          mavenPath = property.mavenHome
+
+          echo "email recipients:" + emailRecipients
+
+
+          //Logical Grouping per enviornment
+          if (environment == 'DEV')
+          {
+              checkoutFromGit=true
+              releaseVersion = '1.0.0.' + env.BUILD_NUMBER
+              checkoutBranch = property.devbranch
+          }
+          else if (environment == 'QA')
+          {
+            
+
+            checkoutFromGit=false
+            properties([buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '3')), disableConcurrentBuilds(), [$class: 'RebuildSettings', autoRebuild: false, rebuildDisabled: false], parameters([[$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Enter Release Version', filterLength: 1, filterable: false, name: 'RELEASE_VERSION', randomName: 'choice-parameter-4521973799795700', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: '''def artifactList = []
+            def proc = [\'bash\', \'-c\', <ARTIFACTORY URL>/koushik-DEV/\'  + " | jq -c \'.children[] | .uri\' | tr -d \'/\' " ].execute()
+            proc.in.eachLine { artifactList.add(it)}
+            artifactList''']]],
+            releaseVersion = RELEASE_VERSION,
+            releaseVersion = releaseVersion.replace("\"", ""),
+            echo ,"RELEASE_VERSION: " + releaseVersion,
+            deploySlot = DEPLOY_SLOT
+          ])])
+          }
+
+          else if (environment == 'UAT' || environment == 'STAGE' || environment == 'PROD')
+          {
+
+
+            checkoutFromGit=false
+            properties([buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '', numToKeepStr: '3')), disableConcurrentBuilds(), [$class: 'RebuildSettings', autoRebuild: false, rebuildDisabled: false], parameters([[$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Enter Release Version', filterLength: 1, filterable: false, name: 'RELEASE_VERSION', randomName: 'choice-parameter-4521973799795700', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: '''def artifactList = []^M
+            def proc = [\'bash\', \'-c\', <ARTIFACTORY URL>/koushik-Release/\'  + " | jq -c \'.children[] | .uri\' | tr -d \'/\' " ].execute()
+            proc.in.eachLine { artifactList.add(it)}^M
+            artifactList''']]],
+            releaseVersion = RELEASE_VERSION,
+            releaseVersion = releaseVersion.replace("\"", ""),
+            echo, "RELEASE_VERSION: " + releaseVersion,
+            deploySlot = DEPLOY_SLOT
+                    ])])
+          }
+
+          else 
+          {
+            throw new Exception(environment + 'is NOTDEFINED')
+          }
+          
+          
+          workSpace = env.WORKSPACE
+
+            //Checkout CODE
+
+          if(checkoutFromGit == true) 
+          {
+            echo 'Checking Out Code from '+checkoutBranch+''
+            
+            checkout([
+            $class: 'GitSCM', 
+            branches: [[name: checkoutBranch]], 
+            doGenerateSubmoduleConfigurations: false, 
+            extensions: [[$class: 'LocalBranch', localBranch: checkoutBranch]], 
+            submoduleCfg: [], 
+            poll: true,
+            userRemoteConfigs: [[credentialsId: gitcredID , url: repoUrl]]])
+         
+                                        
+          }
+          }
+         
+        }
+      }
+    
+
+      
+    stage('build') {
+      when{
+        expression { environment == "DEV" }
+      }
+      steps {
+            
+            echo 'Doing Maven Build'
+            sh "${mavenPath}/mvn clean package -B"
+ 
+      }
+    }
+
+    stage('codeQuality')
+    {
+      when{
+        expression { environment == "DEV" }
+      }
+      steps
+      {
+        script 
+        {
+                withSonarQubeEnv('sonar-qube-jenkins') 
+                {
+                    sh "${mavenPath}/mvn sonar:sonar"
+
+                }
+        }
+      }
+    }
+
+
+    stage('artifactsUpload'){
+      when{
+        expression { (environment == 'DEV') && (checkoutBranch == 'develop') }
+      }
+      steps{  
+        script{
+          
+              echo "Uploading the artifacts to the artifactory"
+              def server = Artifactory.server 'Artifactory'
+              def buildInfo = Artifactory.newBuildInfo()
+              def artifactoryTarget = '"' + artifactDevRepoPath  + releaseVersion + '/' + '"'
+              def artifactName = property.appName + '-' + releaseVersion + '.war'     
+              buildInfo.name = property.appName
+              buildInfo.number = releaseVersion        
+
+              def uploadSpec = 
+                """{
+                      "files": 
+                      [
+                          {
+                              "pattern": "target/ROOT.war",
+                              "target": ${artifactoryTarget}
+                          }
+                      ]
+                 }"""
+            server.upload(uploadSpec,buildInfo)
+            server.publishBuildInfo buildInfo
+                           
+          }
+            
+        }
+      }      
+    
+
+    
+
+    stage('artifactsDownload'){
+      when{
+        expression { environment != "DEV"}
+      }
+      steps{  
+        script{
+          
+          def server = Artifactory.server 'FL_Artifactory'
+         
+          if (environment == 'QA' )
+          {
+
+            def artifactoryDevSource = '"' + artifactDevRepoPath + releaseVersion + '/' + 'ROOT.war' + '"'
+            
+            echo "Downloading the artifacts from the artifactory path -" + artifactoryDevSource   
+
+              def downloadSpec = 
+                """{
+                      "files": 
+                      [
+                          {
+                              "pattern" : ${artifactoryDevSource},
+                              "target": "target/",
+                              "flat": "true"              
+                          }
+                      ]
+                 }"""
+            
+            server.download(downloadSpec)
+
+            
+          }
+          else
+          {
+              
+
+            def artifactoryReleaseSource = '"' + artfactoryReleaseRepoPath + releaseVersion + '/' + 'ROOT.war' + '"'
+              
+            echo "Downloading the artifacts from the artifactory path -" + artifactoryReleaseSource
+
+            def downloadSpec = 
+            """{
+                   "files": 
+                   [
+                      {
+                        "pattern": ${artifactoryReleaseSource},
+                        "target": "target/",
+                        "flat": "true"
+                      }
+                   ]
+              }"""
+
+            server.download(downloadSpec)
+               
+            
+              
+
+          }
+        }
+      }      
+    }
+
+
+  stage('deploy')
+
+  {
+      
+      steps{
+        script {
+          
+        if (environment == 'DEV'){
+          String environmentName = environment.toLowerCase()
+
+          String deployPath = property.get('deployPath');
+          String app_user = property.get('appUser');
+          String restartScript = 'deploy.sh',
+          deployServerName = deployEnv,
+          deployEnvName = environment.toLowerCase()
+          }
+        else {
+            deployServerName = property.get(environment+'_'+deployEnv+'_Servers')
+            deployEnvName = deployEnv.toLowerCase()
+          }
+          print 'Initiating the deployment on - ' + deployServerName^M
+          print 'Copying the artifacts to the node : ' + deployServerName^M
+
+          sh "set -x;scp -q scripts/${restartScript} ${app_user}@${deployServerName}:${deployScriptPath}/"^M
+          sh "set -x;scp -q target/*.* ${app_user}@${deployServerName}:${deployPath}/"^M
+          print 'Successfully completed the Deployment on - ' + deployServerName
+
+          }
+            
+        }
+    }
+      
+    
+    
+
+    stage('Promote Artifacts'){
+      when{
+        expression { environment == "QA"}
+      }
+      steps{  
+        script{
+                
+                echo "promoting artifacts to the release artifactory"
+                def server = Artifactory.server 'Artifactory'
+
+                buildNumber = sh (
+                script: 'unzip -q -c target/ROOT.war META-INF/MANIFEST.MF | grep "Implementation-Version" | cut -d":" -f2',
+                returnStdout: true
+                ).trim()
+
+                
+          
+                def promotionConfig = [
+                      // Mandatory parameters
+                      'buildName'          : 'koushik-app',
+                      'buildNumber'        : buildNumber,
+                      'targetRepo'         : 'koushik-Release',
+                   
+                      // Optional parameters
+                      'comment'            : 'this is the promotion comment',
+                      'sourceRepo'         : 'koushik-DEV',
+                      'status'             : 'Released',
+                      'includeDependencies': true,
+                      'copy'               : true,
+
+                ]
+                server.promote promotionConfig   
+
+        }
+      }      
+    }
+ 
+    
+
+}
+
+  environment {
+    
+    propertyFile = "${propertyFile}"
+    gitPropertyRepo = "${gitPropertyRepo}"
+    gitcredID = 'koushikkatakam1995'
+    gitPropertyBranch = "${gitPropertyBranch}"
+    gitProdCredID = 'afhuf-afjgfs-adfg-hafh'
+    
+     }
+
+  post 
+  {
+    success 
+    {
+      script
+      {
+        def jobName = "${env.JOB_NAME}"
+        String envName = env.JOB_BASE_NAME.tokenize('-').last()
+        String buildURL = env.BUILD_URL
+        String env = envName.toUpperCase()
+        
+            def bodyContent = """<p>Hello Everyone, </p>
+                   <p>Please find the below Build/deployment Status report. </p>
+                   <p>Console Output      : """ + buildURL + """ </p>
+                   <p>Thanks & Regards,</p>
+                    <p>DevOps Team</p>"""
+      }
+    }
+
+    failure 
+    {
+      script
+      {
+        def jobName = "${env.JOB_NAME}"
+        String envName = env.JOB_BASE_NAME.tokenize('-').last()
+        String buildURL = env.BUILD_URL
+        String env = envName.toUpperCase()
+        
+            def bodyContent = """<p>Hello Everyone, </p>
+                   <p>Please find the below Build/deployment Status report. </p>
+                   <p>Console Output      : """ + buildURL + """ </p>
+                   <p>Thanks & Regards,</p>
+                    <p>DevOps Team</p>"""
+      }
+    }
+  } 
+
+  options {
+    timestamps()
+    buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '7', numToKeepStr: '3'))
+    disableConcurrentBuilds()
+  }
+
+}
