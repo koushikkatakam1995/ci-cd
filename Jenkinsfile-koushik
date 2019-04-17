@@ -134,7 +134,24 @@ pipeline {
       }
     }
 
-    
+    stage('codeQuality')
+    {
+      when{
+        expression { environment == "DEV" }
+      }
+      steps
+      {
+        script 
+        {
+                withSonarQubeEnv('sonar-qube-jenkins') 
+                {
+                    sh "${mavenPath}/mvn sonar:sonar"
+
+                }
+        }
+      }
+    }
+
 
     stage('artifactsUpload'){
       when{
