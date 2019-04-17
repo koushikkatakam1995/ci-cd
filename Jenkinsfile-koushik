@@ -143,7 +143,7 @@ pipeline {
       {
         script 
         {
-                withSonarQubeEnv('sonarQube') 
+                withSonarQubeEnv('sonar-qube-jenkins') 
                 {
                     sh "${mavenPath}/mvn sonar:sonar"
 
