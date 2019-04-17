@@ -134,24 +134,7 @@ pipeline {
       }
     }
 
-    stage('codeQuality')
-    {
-      when{
-        expression { environment == "DEV" }
-      }
-      steps
-      {
-        script 
-        {
-                withSonarQubeEnv('sonarQube') 
-                {
-                    sh "${mavenPath}/mvn sonar:sonar"
-
-                }
-        }
-      }
-    }
-
+    
 
     stage('artifactsUpload'){
       when{
